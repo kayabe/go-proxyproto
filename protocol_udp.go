@@ -57,6 +57,9 @@ func (p *PacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 
 // WriteTo ...
 func (p *PacketConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
+	if p.header == nil || p.header.Command.IsLocal() || p.readErr != nil {
+		return p.PacketConn.WriteTo(b, addr)
+	}
 	return p.PacketConn.WriteTo(b, addr.(*Addr).RemoteAddr())
 }
 
