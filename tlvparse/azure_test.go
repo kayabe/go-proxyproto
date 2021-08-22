@@ -3,7 +3,7 @@ package tlvparse
 import (
 	"testing"
 
-	"github.com/pires/go-proxyproto"
+	"github.com/kayabe/go-proxyproto"
 )
 
 func TestFindAzurePrivateEndpointLinkID(t *testing.T) {

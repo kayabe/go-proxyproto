@@ -4,7 +4,7 @@ import (
 	"log"
 	"net"
 
-	proxyproto "github.com/pires/go-proxyproto"
+	proxyproto "github.com/kayabe/go-proxyproto"
 )
 
 func main() {

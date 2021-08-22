@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/pires/go-proxyproto"
+	"github.com/kayabe/go-proxyproto"
 )
 
 var testCases = []struct {

@@ -1,9 +1,9 @@
 # go-proxyproto
 
-[![Actions Status](https://github.com/pires/go-proxyproto/workflows/test/badge.svg)](https://github.com/pires/go-proxyproto/actions)
-[![Coverage Status](https://coveralls.io/repos/github/pires/go-proxyproto/badge.svg?branch=master)](https://coveralls.io/github/pires/go-proxyproto?branch=master)
-[![Go Report Card](https://goreportcard.com/badge/github.com/pires/go-proxyproto)](https://goreportcard.com/report/github.com/pires/go-proxyproto)
-[![](https://godoc.org/github.com/pires/go-proxyproto?status.svg)](https://pkg.go.dev/github.com/pires/go-proxyproto?tab=doc)
+[![Actions Status](https://github.com/kayabe/go-proxyproto/workflows/test/badge.svg)](https://github.com/kayabe/go-proxyproto/actions)
+[![Coverage Status](https://coveralls.io/repos/github/kayabe/go-proxyproto/badge.svg?branch=master)](https://coveralls.io/github/kayabe/go-proxyproto?branch=master)
+[![Go Report Card](https://goreportcard.com/badge/github.com/kayabe/go-proxyproto)](https://goreportcard.com/report/github.com/kayabe/go-proxyproto)
+[![](https://godoc.org/github.com/kayabe/go-proxyproto?status.svg)](https://pkg.go.dev/github.com/kayabe/go-proxyproto?tab=doc)
 
 
 A Go library implementation of the [PROXY protocol, versions 1 and 2](https://www.haproxy.org/download/2.3/doc/proxy-protocol.txt),
@@ -20,7 +20,7 @@ Both protocol versions, 1 (text-based) and 2 (binary-based) are supported.
 ## Installation
 
 ```shell
-$ go get -u github.com/pires/go-proxyproto
+$ go get -u github.com/kayabe/go-proxyproto
 ```
 
 ## Usage
@@ -35,7 +35,7 @@ import (
 	"log"
 	"net"
 
-	proxyproto "github.com/pires/go-proxyproto"
+	proxyproto "github.com/kayabe/go-proxyproto"
 )
 
 func chkErr(err error) {
@@ -87,7 +87,7 @@ import (
 	"log"
 	"net"
 
-	proxyproto "github.com/pires/go-proxyproto"
+	proxyproto "github.com/kayabe/go-proxyproto"
 )
 
 func main() {
@@ -128,7 +128,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/pires/go-proxyproto"
+	"github.com/kayabe/go-proxyproto"
 )
 
 func main() {
