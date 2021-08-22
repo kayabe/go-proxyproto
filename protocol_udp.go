@@ -38,7 +38,7 @@ func (p *PacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
 
 	p.readErr = p.readHeader(tmpBuf[:n])
 	if p.readErr != nil {
-		return 0, nil, p.readErr
+		return 0, orig, p.readErr
 	}
 
 	if p.header != nil {
