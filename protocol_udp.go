@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"net"
-	"sync"
 )
 
 // PacketConn provides a PROXY-aware wrapper around existing net.PacketConn
@@ -12,16 +11,18 @@ type PacketConn struct {
 	net.PacketConn
 
 	header            *Header
-	once              sync.Once
 	ProxyHeaderPolicy Policy
 	Validate          Validator
 	readErr           error
 }
 
 // NewPacketConn returns a new PacketConn
-func NewPacketConn(conn net.PacketConn) *PacketConn {
+func NewPacketConn(conn net.PacketConn, opts ...func(*PacketConn)) *PacketConn {
 	packetConn := &PacketConn{
 		PacketConn: conn,
+	}
+	for _, opt := range opts {
+		opt(packetConn)
 	}
 	return packetConn
 }
@@ -31,19 +32,24 @@ func NewPacketConn(conn net.PacketConn) *PacketConn {
 // It will parse PROXY header first, then copies the actual data into p.  On
 // successful parse, the returned address will be of type *Addr
 func (p *PacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	p.readErr = p.readHeader()
+	tmpBuf := make([]byte, 512+len(b))
+
+	n, orig, origErr := p.PacketConn.ReadFrom(tmpBuf)
+
+	p.readErr = p.readHeader(tmpBuf[:n])
 	if p.readErr != nil {
 		return 0, nil, p.readErr
 	}
 
-	n, orig, origErr := p.PacketConn.ReadFrom(b)
-
 	if p.header != nil {
+		n, orig, origErr := p.PacketConn.ReadFrom(b)
 
 		return n, &Addr{
 			Addr:       p.header.SourceAddr,
 			remoteAddr: orig,
 		}, origErr
+	} else {
+		n = copy(b, tmpBuf[:n])
 	}
 
 	return n, orig, origErr
@@ -82,15 +88,8 @@ func (p *PacketConn) ProxyHeader() *Header {
 	return p.header
 }
 
-func (p *PacketConn) readHeader() error {
-	tmpBuf := make([]byte, 512)
-
-	n, _, _ := p.PacketConn.ReadFrom(tmpBuf)
-	if n <= 0 {
-		return nil
-	}
-
-	rb := bytes.NewReader(tmpBuf[:n])
+func (p *PacketConn) readHeader(buf []byte) error {
+	rb := bytes.NewReader(buf)
 	br := bufio.NewReader(rb)
 
 	header, err := Read(br)
