@@ -6,14 +6,25 @@ import (
 	"net"
 )
 
+const readBufSize = 512
+
+type ReadInfo struct {
+	buf  []byte
+	bufN int
+	addr net.Addr
+	err  error
+}
+
 // PacketConn provides a PROXY-aware wrapper around existing net.PacketConn
 type PacketConn struct {
 	net.PacketConn
 
-	header            *Header
 	ProxyHeaderPolicy Policy
 	Validate          Validator
-	readErr           error
+
+	header   *Header
+	readInfo *ReadInfo
+	readErr  error
 }
 
 // NewPacketConn returns a new PacketConn
@@ -31,36 +42,62 @@ func NewPacketConn(conn net.PacketConn, opts ...func(*PacketConn)) *PacketConn {
 //
 // It will parse PROXY header first, then copies the actual data into p.  On
 // successful parse, the returned address will be of type *Addr
-func (p *PacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
-	tmpBuf := make([]byte, 512+len(b))
+func (p *PacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
+	// Reset Header and ReadInfo everytime ReadFrom is called
+	p.header = nil
+	p.readInfo = nil
+	//
 
-	n, orig, origErr := p.PacketConn.ReadFrom(tmpBuf)
-
-	p.readErr = p.readHeader(tmpBuf[:n])
-	if p.readErr != nil {
-		return 0, orig, p.readErr
+	if p.readErr = p.readHeader(); p.readErr != nil {
+		// Returns the address read by readHeader and the error
+		return 0, p.readInfo.addr, p.readErr
 	}
 
 	if p.header != nil {
-		n, orig, origErr := p.PacketConn.ReadFrom(b)
+		n, addr, err = p.PacketConn.ReadFrom(b)
 
-		return n, &Addr{
+		// Overwrite addr
+		addr = &Addr{
+			remoteAddr: addr,
 			Addr:       p.header.SourceAddr,
-			remoteAddr: orig,
-		}, origErr
+		}
+	} else if p.readInfo.bufN > 0 {
+		var j int = 0
+
+		// Copy readBuf
+		n = copy(b, p.readInfo.buf[:p.readInfo.bufN])
+
+		// Continue reading the rest if necessary
+		if p.readInfo.bufN > readBufSize {
+			j, addr, err = p.PacketConn.ReadFrom(b[p.readInfo.bufN:])
+		} else {
+			addr = p.readInfo.addr
+		}
+
+		n = n + j
+
 	} else {
-		n = copy(b, tmpBuf[:n])
+		n, addr, err = p.PacketConn.ReadFrom(b)
 	}
 
-	return n, orig, origErr
+	return n, addr, err
 }
 
 // WriteTo ...
 func (p *PacketConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
-	if p.header == nil || p.header.Command.IsLocal() || p.readErr != nil {
-		return p.PacketConn.WriteTo(b, addr)
+	switch addr := addr.(type) {
+	case *Addr:
+		return p.PacketConn.WriteTo(b, addr.RemoteAddr())
 	}
-	return p.PacketConn.WriteTo(b, addr.(*Addr).RemoteAddr())
+	return p.PacketConn.WriteTo(b, addr)
+}
+
+// Raw returns the underlying connection which can be casted to
+// a concrete type, allowing access to specialized functions.
+//
+// Use this ONLY if you know exactly what you are doing.
+func (p *PacketConn) Raw() net.PacketConn {
+	return p.PacketConn
 }
 
 // LocalAddr returns the address of the server if the proxy
@@ -77,22 +114,21 @@ func (p *PacketConn) LocalAddr() net.Addr {
 	return p.header.DestinationAddr
 }
 
-// Raw returns the underlying connection which can be casted to
-// a concrete type, allowing access to specialized functions.
-//
-// Use this ONLY if you know exactly what you are doing.
-func (p *PacketConn) Raw() net.PacketConn {
-	return p.PacketConn
-}
+func (p *PacketConn) readHeader() error {
+	rf := &ReadInfo{
+		buf: make([]byte, readBufSize),
+	}
 
-// ProxyHeader returns the proxy protocol header, if any. If an error occurs
-// while reading the proxy header, nil is returned.
-func (p *PacketConn) ProxyHeader() *Header {
-	return p.header
-}
+	defer func() {
+		p.readInfo = rf
+	}()
 
-func (p *PacketConn) readHeader(buf []byte) error {
-	rb := bytes.NewReader(buf)
+	rf.bufN, rf.addr, rf.err = p.PacketConn.ReadFrom(rf.buf)
+	if rf.err != nil {
+		return nil
+	}
+
+	rb := bytes.NewReader(rf.buf[:rf.bufN])
 	br := bufio.NewReader(rb)
 
 	header, err := Read(br)
