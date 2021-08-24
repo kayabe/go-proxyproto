@@ -123,7 +123,7 @@ func (p *PacketConn) ProxyHeader() *Header {
 	return p.header
 }
 
-func (p *PacketConn) readHeader() error {
+func (p *PacketConn) readHeader() (err error) {
 	rf := &ReadInfo{
 		buf: make([]byte, readBufSize),
 	}
@@ -137,9 +137,11 @@ func (p *PacketConn) readHeader() error {
 		return nil
 	}
 
-	policy, err := p.ProxyHeaderPolicy(rf.addr)
-	if err != nil {
-		return nil
+	var policy Policy
+	if p.ProxyHeaderPolicy != nil {
+		if policy, err = p.ProxyHeaderPolicy(rf.addr); err != nil {
+			return nil
+		}
 	}
 
 	rb := bytes.NewReader(rf.buf[:rf.bufN])
