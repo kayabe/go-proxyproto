@@ -6,6 +6,13 @@ import (
 	"net"
 )
 
+type Error struct {
+	error
+}
+
+func (e *Error) Timeout() bool   { return false }
+func (e *Error) Temporary() bool { return true }
+
 const readBufSize = 512
 
 type ReadInfo struct {
@@ -50,7 +57,7 @@ func (p *PacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 
 	if p.readErr = p.readHeader(); p.readErr != nil {
 		// Returns the address read by readHeader and the error
-		return p.PacketConn.ReadFrom(b)
+		return 0, p.readInfo.addr, p.readErr
 	}
 
 	if p.header != nil {
@@ -134,13 +141,13 @@ func (p *PacketConn) readHeader() (err error) {
 
 	rf.bufN, rf.addr, rf.err = p.PacketConn.ReadFrom(rf.buf)
 	if rf.err != nil {
-		return nil
+		return &Error{net.ErrClosed}
 	}
 
 	var policy Policy
 	if p.ProxyHeaderPolicy != nil {
 		if policy, err = p.ProxyHeaderPolicy(rf.addr); err != nil {
-			return nil
+			return &Error{net.ErrClosed}
 		}
 	}
 
@@ -153,7 +160,7 @@ func (p *PacketConn) readHeader() (err error) {
 	if err == ErrNoProxyProtocol {
 		// but not if it is required that the connection has one
 		if policy == REQUIRE {
-			return err
+			return &Error{ErrNoProxyProtocol}
 		}
 
 		return nil
@@ -163,13 +170,13 @@ func (p *PacketConn) readHeader() (err error) {
 	if err == nil && header != nil {
 		switch policy {
 		case REJECT:
-			// this connection is not allowed to send one
-			return ErrSuperfluousProxyHeader
+			// this connection is not allowed to send one ErrSuperfluousProxyHeader
+			return &Error{ErrSuperfluousProxyHeader}
 		case USE, REQUIRE:
 			if p.Validate != nil {
 				err = p.Validate(header)
 				if err != nil {
-					return err
+					return &Error{err}
 				}
 			}
 
