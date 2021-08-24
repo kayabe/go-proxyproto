@@ -50,7 +50,7 @@ func (p *PacketConn) ReadFrom(b []byte) (n int, addr net.Addr, err error) {
 
 	if p.readErr = p.readHeader(); p.readErr != nil {
 		// Returns the address read by readHeader and the error
-		return 0, p.readInfo.addr, p.readErr
+		return p.PacketConn.ReadFrom(b)
 	}
 
 	if p.header != nil {
