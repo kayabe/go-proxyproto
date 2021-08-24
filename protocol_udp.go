@@ -19,7 +19,7 @@ type ReadInfo struct {
 type PacketConn struct {
 	net.PacketConn
 
-	ProxyHeaderPolicy Policy
+	ProxyHeaderPolicy PolicyFunc
 	Validate          Validator
 
 	header   *Header
@@ -137,6 +137,11 @@ func (p *PacketConn) readHeader() error {
 		return nil
 	}
 
+	policy, err := p.ProxyHeaderPolicy(rf.addr)
+	if err != nil {
+		return nil
+	}
+
 	rb := bytes.NewReader(rf.buf[:rf.bufN])
 	br := bufio.NewReader(rb)
 
@@ -145,7 +150,7 @@ func (p *PacketConn) readHeader() error {
 	// let's act as if there was no error when PROXY protocol is not present.
 	if err == ErrNoProxyProtocol {
 		// but not if it is required that the connection has one
-		if p.ProxyHeaderPolicy == REQUIRE {
+		if policy == REQUIRE {
 			return err
 		}
 
@@ -154,7 +159,7 @@ func (p *PacketConn) readHeader() error {
 
 	// proxy protocol header was found
 	if err == nil && header != nil {
-		switch p.ProxyHeaderPolicy {
+		switch policy {
 		case REJECT:
 			// this connection is not allowed to send one
 			return ErrSuperfluousProxyHeader
