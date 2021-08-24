@@ -114,6 +114,15 @@ func (p *PacketConn) LocalAddr() net.Addr {
 	return p.header.DestinationAddr
 }
 
+// ProxyHeader returns the proxy protocol header, if any. If an error occurs
+// while reading the proxy header, nil is returned.
+func (p *PacketConn) ProxyHeader() *Header {
+	if p.header == nil {
+		p.readErr = p.readHeader()
+	}
+	return p.header
+}
+
 func (p *PacketConn) readHeader() error {
 	rf := &ReadInfo{
 		buf: make([]byte, readBufSize),

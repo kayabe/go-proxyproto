@@ -92,7 +92,7 @@ func TestReadV1Invalid(t *testing.T) {
 	for _, tt := range invalidParseV1Tests {
 		t.Run(tt.desc, func(t *testing.T) {
 			if _, err := Read(tt.reader); err != tt.expectedError {
-				t.Fatalf("expected %s, actual %v", tt.expectedError, err)
+				t.Errorf("expected %s, actual %v", tt.expectedError, err)
 			}
 		})
 	}
@@ -157,7 +157,7 @@ func TestParseV1Valid(t *testing.T) {
 				t.Fatal("unexpected error", err.Error())
 			}
 			if !header.EqualsTo(tt.expectedHeader) {
-				t.Fatalf("expected %#v, actual %#v", tt.expectedHeader, header)
+				t.Errorf("expected %#v, actual %#v", tt.expectedHeader, header)
 			}
 		})
 	}
@@ -181,7 +181,7 @@ func TestWriteV1Valid(t *testing.T) {
 			}
 
 			if !newHeader.EqualsTo(tt.expectedHeader) {
-				t.Fatalf("expected %#v, actual %#v", tt.expectedHeader, newHeader)
+				t.Errorf("expected %#v, actual %#v", tt.expectedHeader, newHeader)
 			}
 		})
 	}
@@ -216,14 +216,14 @@ func TestParseVersion1Overflow(t *testing.T) {
 	ds.NBytes = bufSize * 16
 	parseVersion1(reader)
 	if ds.NRead > bufSize {
-		t.Fatalf("read: expected max %d bytes, actual %d\n", bufSize, ds.NRead)
+		t.Errorf("read: expected max %d bytes, actual %d\n", bufSize, ds.NRead)
 	}
 }
 
 func listen(t *testing.T) *Listener {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("listen: %v", err)
+		t.Errorf("listen: %v", err)
 	}
 	return &Listener{Listener: l}
 }
@@ -231,7 +231,7 @@ func listen(t *testing.T) *Listener {
 func client(t *testing.T, addr, header string, length int, terminate bool, wait time.Duration, done chan struct{}) {
 	c, err := net.Dial("tcp", addr)
 	if err != nil {
-		t.Fatalf("dial: %v", err)
+		t.Errorf("dial: %v", err)
 	}
 	defer c.Close()
 
@@ -250,10 +250,10 @@ func client(t *testing.T, addr, header string, length int, terminate bool, wait 
 
 	n, err := c.Write(buf)
 	if err != nil {
-		t.Fatalf("write: %v", err)
+		t.Errorf("write: %v", err)
 	}
 	if n != len(buf) {
-		t.Fatalf("write; short write")
+		t.Errorf("write; short write")
 	}
 
 	time.Sleep(wait)
@@ -268,13 +268,13 @@ func TestVersion1Overflow(t *testing.T) {
 
 	c, err := l.Accept()
 	if err != nil {
-		t.Fatalf("accept: %v", err)
+		t.Errorf("accept: %v", err)
 	}
 
 	b := []byte{}
 	_, err = c.Read(b)
 	if err == nil {
-		t.Fatalf("net.Conn: no error reported for oversized header")
+		t.Errorf("net.Conn: no error reported for oversized header")
 	}
 }
 
@@ -287,7 +287,7 @@ func TestVersion1SlowLoris(t *testing.T) {
 
 	c, err := l.Accept()
 	if err != nil {
-		t.Fatalf("accept: %v", err)
+		t.Errorf("accept: %v", err)
 	}
 
 	go func() {
@@ -298,10 +298,10 @@ func TestVersion1SlowLoris(t *testing.T) {
 
 	select {
 	case <-done:
-		t.Fatalf("net.Conn: reader still blocked after 10 seconds")
+		t.Errorf("net.Conn: reader still blocked after 10 seconds")
 	case err := <-timeout:
 		if err == nil {
-			t.Fatalf("net.Conn: no error reported for incomplete header")
+			t.Errorf("net.Conn: no error reported for incomplete header")
 		}
 	}
 }
@@ -315,7 +315,7 @@ func TestVersion1SlowLorisOverflow(t *testing.T) {
 
 	c, err := l.Accept()
 	if err != nil {
-		t.Fatalf("accept: %v", err)
+		t.Errorf("accept: %v", err)
 	}
 
 	go func() {
@@ -326,10 +326,10 @@ func TestVersion1SlowLorisOverflow(t *testing.T) {
 
 	select {
 	case <-done:
-		t.Fatalf("net.Conn: reader still blocked after 10 seconds")
+		t.Errorf("net.Conn: reader still blocked after 10 seconds")
 	case err := <-timeout:
 		if err == nil {
-			t.Fatalf("net.Conn: no error reported for incomplete and overflowed header")
+			t.Errorf("net.Conn: no error reported for incomplete and overflowed header")
 		}
 	}
 }
