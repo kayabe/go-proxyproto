@@ -47,7 +47,7 @@ func WithPolicy(p Policy) func(*Conn) {
 // header will be ignored. If one of the provided IP addresses or IP ranges
 // is invalid it will return an error instead of a PolicyFunc.
 func LaxWhiteListPolicy(allowed []string) (PolicyFunc, error) {
-	allowFrom, err := parse(allowed)
+	allowFrom, err := Parse(allowed)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +74,7 @@ func MustLaxWhiteListPolicy(allowed []string) PolicyFunc {
 // handle that case properly. If one of the provided IP addresses or IP
 // ranges is invalid it will return an error instead of a PolicyFunc.
 func StrictWhiteListPolicy(allowed []string) (PolicyFunc, error) {
-	allowFrom, err := parse(allowed)
+	allowFrom, err := Parse(allowed)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func MustStrictWhiteListPolicy(allowed []string) PolicyFunc {
 
 func whitelistPolicy(allowed []func(net.IP) bool, def Policy) PolicyFunc {
 	return func(upstream net.Addr) (Policy, error) {
-		upstreamIP, err := ipFromAddr(upstream)
+		upstreamIP, err := IPFromAddr(upstream)
 		if err != nil {
 			// something is wrong with the source IP, better reject the connection
 			return REJECT, err
@@ -111,7 +111,7 @@ func whitelistPolicy(allowed []func(net.IP) bool, def Policy) PolicyFunc {
 	}
 }
 
-func parse(allowed []string) ([]func(net.IP) bool, error) {
+func Parse(allowed []string) ([]func(net.IP) bool, error) {
 	a := make([]func(net.IP) bool, len(allowed))
 	for i, allowFrom := range allowed {
 		if strings.LastIndex(allowFrom, "/") > 0 {
@@ -134,7 +134,7 @@ func parse(allowed []string) ([]func(net.IP) bool, error) {
 	return a, nil
 }
 
-func ipFromAddr(upstream net.Addr) (net.IP, error) {
+func IPFromAddr(upstream net.Addr) (net.IP, error) {
 	upstreamString, _, err := net.SplitHostPort(upstream.String())
 	if err != nil {
 		return nil, err
