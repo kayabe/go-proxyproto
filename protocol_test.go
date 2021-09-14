@@ -14,7 +14,6 @@ import (
 	"io"
 	"io/ioutil"
 	"net"
-	"os"
 	"testing"
 	"time"
 )
@@ -22,7 +21,7 @@ import (
 func TestPassthrough(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 
 	pl := &Listener{Listener: l}
@@ -30,7 +29,7 @@ func TestPassthrough(t *testing.T) {
 	go func() {
 		conn, err := net.Dial("tcp", pl.Addr().String())
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		defer conn.Close()
 
@@ -38,69 +37,138 @@ func TestPassthrough(t *testing.T) {
 		recv := make([]byte, 4)
 		_, err = conn.Read(recv)
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		if !bytes.Equal(recv, []byte("pong")) {
-			t.Errorf("bad: %v", recv)
+			t.Fatalf("bad: %v", recv)
 		}
 	}()
 
 	conn, err := pl.Accept()
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 	defer conn.Close()
 
 	recv := make([]byte, 4)
 	_, err = conn.Read(recv)
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 	if !bytes.Equal(recv, []byte("ping")) {
-		t.Errorf("bad: %v", recv)
+		t.Fatalf("bad: %v", recv)
 	}
 
 	if _, err := conn.Write([]byte("pong")); err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 }
 
-func TestReadHeaderTimeout(t *testing.T) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Errorf("err: %v", err)
+// TestRequiredWithReadHeaderTimeout will iterate through 3 different timeouts to see
+// whether using a REQUIRE policy for a listener would cause an error if the timeout
+// is triggerred without a proxy protocol header being defined.
+func TestRequiredWithReadHeaderTimeout(t *testing.T) {
+	for _, duration := range []int{100, 200, 400} {
+		t.Run(fmt.Sprint(duration), func(t *testing.T) {
+			start := time.Now()
+
+			l, err := net.Listen("tcp", "127.0.0.1:0")
+
+			if err != nil {
+				t.Fatalf("err: %v", err)
+			}
+
+			pl := &Listener{
+				Listener:          l,
+				ReadHeaderTimeout: time.Millisecond * time.Duration(duration),
+				Policy: func(upstream net.Addr) (Policy, error) {
+					return REQUIRE, nil
+				},
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			go func() {
+				conn, err := net.Dial("tcp", pl.Addr().String())
+				if err != nil {
+					t.Fatalf("err: %v", err)
+				}
+				defer conn.Close()
+
+				<-ctx.Done()
+			}()
+
+			conn, err := pl.Accept()
+			if err != nil {
+				t.Fatalf("err: %v", err)
+			}
+			defer conn.Close()
+
+			// Read blocks forever if there is no ReadHeaderTimeout and the policy is not REQUIRE
+			recv := make([]byte, 4)
+			_, err = conn.Read(recv)
+
+			if err != nil && !errors.Is(err, ErrNoProxyProtocol) && time.Since(start)-pl.ReadHeaderTimeout > 10*time.Millisecond {
+				t.Fatal("proxy proto should not be found and time should be close to read timeout")
+			}
+		})
 	}
+}
 
-	pl := &Listener{
-		Listener:          l,
-		ReadHeaderTimeout: time.Millisecond * 250,
-	}
+// TestUseWithReadHeaderTimeout will iterate through 3 different timeouts to see
+// whether using a USE policy for a listener would not cause an error if the timeout
+// is triggerred without a proxy protocol header being defined.
+func TestUseWithReadHeaderTimeout(t *testing.T) {
+	for _, duration := range []int{100, 200, 400} {
+		t.Run(fmt.Sprint(duration), func(t *testing.T) {
+			start := time.Now()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+			l, err := net.Listen("tcp", "127.0.0.1:0")
 
-	go func() {
-		conn, err := net.Dial("tcp", pl.Addr().String())
-		if err != nil {
-			t.Errorf("err: %v", err)
-		}
-		defer conn.Close()
+			if err != nil {
+				t.Fatalf("err: %v", err)
+			}
 
-		<-ctx.Done()
-	}()
+			pl := &Listener{
+				Listener:          l,
+				ReadHeaderTimeout: time.Millisecond * time.Duration(duration),
+				Policy: func(upstream net.Addr) (Policy, error) {
+					return USE, nil
+				},
+			}
 
-	conn, err := pl.Accept()
-	if err != nil {
-		t.Errorf("err: %v", err)
-	}
-	defer conn.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 
-	// Read blocks forever if there is no ReadHeaderTimeout
-	recv := make([]byte, 4)
-	_, err = conn.Read(recv)
+			go func() {
+				conn, err := net.Dial("tcp", pl.Addr().String())
+				if err != nil {
+					t.Fatalf("err: %v", err)
+				}
+				defer conn.Close()
 
-	if err != nil && !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatal("should timeout")
+				<-ctx.Done()
+			}()
+
+			conn, err := pl.Accept()
+			if err != nil {
+				t.Fatalf("err: %v", err)
+			}
+			defer conn.Close()
+
+			// 2 times the ReadHeaderTimeout because the first timeout
+			// should occur (the one set on the listener) and allow for the second to follow up
+			conn.SetDeadline(time.Now().Add(pl.ReadHeaderTimeout * 2))
+
+			// Read blocks forever if there is no ReadHeaderTimeout
+			recv := make([]byte, 4)
+			_, err = conn.Read(recv)
+
+			if err != nil && !errors.Is(err, ErrNoProxyProtocol) && (time.Since(start)-(pl.ReadHeaderTimeout*2)) > 10*time.Millisecond {
+				t.Fatal("proxy proto should not be found and time should be close to read timeout")
+			}
+		})
 	}
 }
 
@@ -133,7 +201,7 @@ func TestReadHeaderTimeoutIsReset(t *testing.T) {
 	go func() {
 		conn, err := net.Dial("tcp", pl.Addr().String())
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		defer conn.Close()
 
@@ -147,10 +215,220 @@ func TestReadHeaderTimeoutIsReset(t *testing.T) {
 		recv := make([]byte, 4)
 		_, err = conn.Read(recv)
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		if !bytes.Equal(recv, []byte("pong")) {
-			t.Errorf("bad: %v", recv)
+			t.Fatalf("bad: %v", recv)
+		}
+	}()
+
+	conn, err := pl.Accept()
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	defer conn.Close()
+
+	// Set our deadlines higher than our ReadHeaderTimeout
+	conn.SetReadDeadline(time.Now().Add(timeout * 3))
+	conn.SetWriteDeadline(time.Now().Add(timeout * 3))
+
+	recv := make([]byte, 4)
+	_, err = conn.Read(recv)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !bytes.Equal(recv, []byte("ping")) {
+		t.Fatalf("bad: %v", recv)
+	}
+
+	if _, err := conn.Write([]byte("pong")); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	// Check the remote addr
+	addr := conn.RemoteAddr().(*net.TCPAddr)
+	if addr.IP.String() != "10.1.1.1" {
+		t.Fatalf("bad: %v", addr)
+	}
+	if addr.Port != 1000 {
+		t.Fatalf("bad: %v", addr)
+	}
+
+	h := conn.(*Conn).ProxyHeader()
+	if !h.EqualsTo(header) {
+		t.Errorf("bad: %v", h)
+	}
+}
+
+// TestReadHeaderTimeoutIsEmpty ensures the default is set if it is empty.
+// Because the default is 200ms and we wait longer than that to send a message,
+// we expect the actual address and port to be returned,
+// rather than the ProxyHeader we defined.
+func TestReadHeaderTimeoutIsEmpty(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	pl := &Listener{
+		Listener: l,
+	}
+
+	header := &Header{
+		Version:           2,
+		Command:           PROXY,
+		TransportProtocol: TCPv4,
+		SourceAddr: &net.TCPAddr{
+			IP:   net.ParseIP("10.1.1.1"),
+			Port: 1000,
+		},
+		DestinationAddr: &net.TCPAddr{
+			IP:   net.ParseIP("20.2.2.2"),
+			Port: 2000,
+		},
+	}
+	go func() {
+		conn, err := net.Dial("tcp", pl.Addr().String())
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		defer conn.Close()
+
+		// Sleep here longer than the configured timeout.
+		time.Sleep(250 * time.Millisecond)
+
+		// Write out the header!
+		header.WriteTo(conn)
+
+		conn.Write([]byte("ping"))
+	}()
+
+	conn, err := pl.Accept()
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	defer conn.Close()
+
+	recv := make([]byte, 4)
+	_, err = conn.Read(recv)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	// Check the remote addr
+	addr := conn.RemoteAddr().(*net.TCPAddr)
+	if addr.IP.String() == "10.1.1.1" {
+		t.Fatalf("bad: %v", addr)
+	}
+	if addr.Port == 1000 {
+		t.Fatalf("bad: %v", addr)
+	}
+}
+
+// TestReadHeaderTimeoutIsNegative does the same as above except
+// with a negative timeout. Therefore, we expect the right ProxyHeader
+// to be returned.
+func TestReadHeaderTimeoutIsNegative(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	pl := &Listener{
+		Listener:          l,
+		ReadHeaderTimeout: -1,
+	}
+
+	header := &Header{
+		Version:           2,
+		Command:           PROXY,
+		TransportProtocol: TCPv4,
+		SourceAddr: &net.TCPAddr{
+			IP:   net.ParseIP("10.1.1.1"),
+			Port: 1000,
+		},
+		DestinationAddr: &net.TCPAddr{
+			IP:   net.ParseIP("20.2.2.2"),
+			Port: 2000,
+		},
+	}
+	go func() {
+		conn, err := net.Dial("tcp", pl.Addr().String())
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		defer conn.Close()
+
+		// Sleep here longer than the configured timeout.
+		time.Sleep(250 * time.Millisecond)
+
+		// Write out the header!
+		header.WriteTo(conn)
+
+		conn.Write([]byte("ping"))
+	}()
+
+	conn, err := pl.Accept()
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	defer conn.Close()
+
+	recv := make([]byte, 4)
+	_, err = conn.Read(recv)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	// Check the remote addr
+	addr := conn.RemoteAddr().(*net.TCPAddr)
+	if addr.IP.String() != "10.1.1.1" {
+		t.Fatalf("bad: %v", addr)
+	}
+	if addr.Port != 1000 {
+		t.Fatalf("bad: %v", addr)
+	}
+}
+
+func TestParse_ipv4(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+
+	pl := &Listener{Listener: l}
+
+	header := &Header{
+		Version:           2,
+		Command:           PROXY,
+		TransportProtocol: TCPv4,
+		SourceAddr: &net.TCPAddr{
+			IP:   net.ParseIP("10.1.1.1"),
+			Port: 1000,
+		},
+		DestinationAddr: &net.TCPAddr{
+			IP:   net.ParseIP("20.2.2.2"),
+			Port: 2000,
+		},
+	}
+	go func() {
+		conn, err := net.Dial("tcp", pl.Addr().String())
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		defer conn.Close()
+
+		// Write out the header!
+		header.WriteTo(conn)
+
+		conn.Write([]byte("ping"))
+		recv := make([]byte, 4)
+		_, err = conn.Read(recv)
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if !bytes.Equal(recv, []byte("pong")) {
+			t.Fatalf("bad: %v", recv)
 		}
 	}()
 
@@ -188,86 +466,10 @@ func TestReadHeaderTimeoutIsReset(t *testing.T) {
 	}
 }
 
-func TestParse_ipv4(t *testing.T) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Errorf("err: %v", err)
-	}
-
-	pl := &Listener{Listener: l}
-
-	header := &Header{
-		Version:           2,
-		Command:           PROXY,
-		TransportProtocol: TCPv4,
-		SourceAddr: &net.TCPAddr{
-			IP:   net.ParseIP("10.1.1.1"),
-			Port: 1000,
-		},
-		DestinationAddr: &net.TCPAddr{
-			IP:   net.ParseIP("20.2.2.2"),
-			Port: 2000,
-		},
-	}
-	go func() {
-		conn, err := net.Dial("tcp", pl.Addr().String())
-		if err != nil {
-			t.Errorf("err: %v", err)
-		}
-		defer conn.Close()
-
-		// Write out the header!
-		header.WriteTo(conn)
-
-		conn.Write([]byte("ping"))
-		recv := make([]byte, 4)
-		_, err = conn.Read(recv)
-		if err != nil {
-			t.Errorf("err: %v", err)
-		}
-		if !bytes.Equal(recv, []byte("pong")) {
-			t.Errorf("bad: %v", recv)
-		}
-	}()
-
-	conn, err := pl.Accept()
-	if err != nil {
-		t.Errorf("err: %v", err)
-	}
-	defer conn.Close()
-
-	recv := make([]byte, 4)
-	_, err = conn.Read(recv)
-	if err != nil {
-		t.Errorf("err: %v", err)
-	}
-	if !bytes.Equal(recv, []byte("ping")) {
-		t.Errorf("bad: %v", recv)
-	}
-
-	if _, err := conn.Write([]byte("pong")); err != nil {
-		t.Errorf("err: %v", err)
-	}
-
-	// Check the remote addr
-	addr := conn.RemoteAddr().(*net.TCPAddr)
-	if addr.IP.String() != "10.1.1.1" {
-		t.Errorf("bad: %v", addr)
-	}
-	if addr.Port != 1000 {
-		t.Errorf("bad: %v", addr)
-	}
-
-	h := conn.(*Conn).ProxyHeader()
-	if !h.EqualsTo(header) {
-		t.Errorf("bad: %v", h)
-	}
-}
-
 func TestParse_ipv6(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 
 	pl := &Listener{Listener: l}
@@ -289,7 +491,7 @@ func TestParse_ipv6(t *testing.T) {
 	go func() {
 		conn, err := net.Dial("tcp", pl.Addr().String())
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		defer conn.Close()
 
@@ -300,39 +502,39 @@ func TestParse_ipv6(t *testing.T) {
 		recv := make([]byte, 4)
 		_, err = conn.Read(recv)
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		if !bytes.Equal(recv, []byte("pong")) {
-			t.Errorf("bad: %v", recv)
+			t.Fatalf("bad: %v", recv)
 		}
 	}()
 
 	conn, err := pl.Accept()
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 	defer conn.Close()
 
 	recv := make([]byte, 4)
 	_, err = conn.Read(recv)
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 	if !bytes.Equal(recv, []byte("ping")) {
-		t.Errorf("bad: %v", recv)
+		t.Fatalf("bad: %v", recv)
 	}
 
 	if _, err := conn.Write([]byte("pong")); err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 
 	// Check the remote addr
 	addr := conn.RemoteAddr().(*net.TCPAddr)
 	if addr.IP.String() != "ffff::ffff" {
-		t.Errorf("bad: %v", addr)
+		t.Fatalf("bad: %v", addr)
 	}
 	if addr.Port != 1000 {
-		t.Errorf("bad: %v", addr)
+		t.Fatalf("bad: %v", addr)
 	}
 
 	h := conn.(*Conn).ProxyHeader()
@@ -344,7 +546,7 @@ func TestParse_ipv6(t *testing.T) {
 func TestAcceptReturnsErrorWhenPolicyFuncErrors(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 
 	expectedErr := fmt.Errorf("failure")
@@ -355,25 +557,25 @@ func TestAcceptReturnsErrorWhenPolicyFuncErrors(t *testing.T) {
 	go func() {
 		conn, err := net.Dial("tcp", pl.Addr().String())
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		defer conn.Close()
 	}()
 
 	conn, err := pl.Accept()
 	if err != expectedErr {
-		t.Errorf("Expected error %v, got %v", expectedErr, err)
+		t.Fatalf("Expected error %v, got %v", expectedErr, err)
 	}
 
 	if conn != nil {
-		t.Errorf("Expected no connection, got %v", conn)
+		t.Fatalf("Expected no connection, got %v", conn)
 	}
 }
 
 func TestReadingIsRefusedWhenProxyHeaderRequiredButMissing(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 
 	policyFunc := func(upstream net.Addr) (Policy, error) { return REQUIRE, nil }
@@ -383,7 +585,7 @@ func TestReadingIsRefusedWhenProxyHeaderRequiredButMissing(t *testing.T) {
 	go func() {
 		conn, err := net.Dial("tcp", pl.Addr().String())
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		defer conn.Close()
 		conn.Write([]byte("ping"))
@@ -391,21 +593,21 @@ func TestReadingIsRefusedWhenProxyHeaderRequiredButMissing(t *testing.T) {
 
 	conn, err := pl.Accept()
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 	defer conn.Close()
 
 	recv := make([]byte, 4)
 	_, err = conn.Read(recv)
 	if err != ErrNoProxyProtocol {
-		t.Errorf("Expected error %v, received %v", ErrNoProxyProtocol, err)
+		t.Fatalf("Expected error %v, received %v", ErrNoProxyProtocol, err)
 	}
 }
 
 func TestReadingIsRefusedWhenProxyHeaderPresentButNotAllowed(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 
 	policyFunc := func(upstream net.Addr) (Policy, error) { return REJECT, nil }
@@ -415,7 +617,7 @@ func TestReadingIsRefusedWhenProxyHeaderPresentButNotAllowed(t *testing.T) {
 	go func() {
 		conn, err := net.Dial("tcp", pl.Addr().String())
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		defer conn.Close()
 		header := &Header{
@@ -436,20 +638,20 @@ func TestReadingIsRefusedWhenProxyHeaderPresentButNotAllowed(t *testing.T) {
 
 	conn, err := pl.Accept()
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 	defer conn.Close()
 
 	recv := make([]byte, 4)
 	_, err = conn.Read(recv)
 	if err != ErrSuperfluousProxyHeader {
-		t.Errorf("Expected error %v, received %v", ErrSuperfluousProxyHeader, err)
+		t.Fatalf("Expected error %v, received %v", ErrSuperfluousProxyHeader, err)
 	}
 }
 func TestIgnorePolicyIgnoresIpFromProxyHeader(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 
 	policyFunc := func(upstream net.Addr) (Policy, error) { return IGNORE, nil }
@@ -459,7 +661,7 @@ func TestIgnorePolicyIgnoresIpFromProxyHeader(t *testing.T) {
 	go func() {
 		conn, err := net.Dial("tcp", pl.Addr().String())
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		defer conn.Close()
 
@@ -483,36 +685,36 @@ func TestIgnorePolicyIgnoresIpFromProxyHeader(t *testing.T) {
 		recv := make([]byte, 4)
 		_, err = conn.Read(recv)
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		if !bytes.Equal(recv, []byte("pong")) {
-			t.Errorf("bad: %v", recv)
+			t.Fatalf("bad: %v", recv)
 		}
 	}()
 
 	conn, err := pl.Accept()
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 	defer conn.Close()
 
 	recv := make([]byte, 4)
 	_, err = conn.Read(recv)
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 	if !bytes.Equal(recv, []byte("ping")) {
-		t.Errorf("bad: %v", recv)
+		t.Fatalf("bad: %v", recv)
 	}
 
 	if _, err := conn.Write([]byte("pong")); err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 
 	// Check the remote addr
 	addr := conn.RemoteAddr().(*net.TCPAddr)
 	if addr.IP.String() != "127.0.0.1" {
-		t.Errorf("bad: %v", addr)
+		t.Fatalf("bad: %v", addr)
 	}
 }
 
@@ -547,7 +749,7 @@ func Test_AllOptionsAreRecognized(t *testing.T) {
 func TestReadingIsRefusedOnErrorWhenRemoteAddrRequestedFirst(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 
 	policyFunc := func(upstream net.Addr) (Policy, error) { return REQUIRE, nil }
@@ -557,7 +759,7 @@ func TestReadingIsRefusedOnErrorWhenRemoteAddrRequestedFirst(t *testing.T) {
 	go func() {
 		conn, err := net.Dial("tcp", pl.Addr().String())
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		defer conn.Close()
 		conn.Write([]byte("ping"))
@@ -565,7 +767,7 @@ func TestReadingIsRefusedOnErrorWhenRemoteAddrRequestedFirst(t *testing.T) {
 
 	conn, err := pl.Accept()
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 	defer conn.Close()
 
@@ -573,14 +775,14 @@ func TestReadingIsRefusedOnErrorWhenRemoteAddrRequestedFirst(t *testing.T) {
 	recv := make([]byte, 4)
 	_, err = conn.Read(recv)
 	if err != ErrNoProxyProtocol {
-		t.Errorf("Expected error %v, received %v", ErrNoProxyProtocol, err)
+		t.Fatalf("Expected error %v, received %v", ErrNoProxyProtocol, err)
 	}
 }
 
 func TestReadingIsRefusedOnErrorWhenLocalAddrRequestedFirst(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 
 	policyFunc := func(upstream net.Addr) (Policy, error) { return REQUIRE, nil }
@@ -590,7 +792,7 @@ func TestReadingIsRefusedOnErrorWhenLocalAddrRequestedFirst(t *testing.T) {
 	go func() {
 		conn, err := net.Dial("tcp", pl.Addr().String())
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		defer conn.Close()
 		conn.Write([]byte("ping"))
@@ -598,7 +800,7 @@ func TestReadingIsRefusedOnErrorWhenLocalAddrRequestedFirst(t *testing.T) {
 
 	conn, err := pl.Accept()
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 	defer conn.Close()
 
@@ -606,14 +808,14 @@ func TestReadingIsRefusedOnErrorWhenLocalAddrRequestedFirst(t *testing.T) {
 	recv := make([]byte, 4)
 	_, err = conn.Read(recv)
 	if err != ErrNoProxyProtocol {
-		t.Errorf("Expected error %v, received %v", ErrNoProxyProtocol, err)
+		t.Fatalf("Expected error %v, received %v", ErrNoProxyProtocol, err)
 	}
 }
 
 func Test_ConnectionCasts(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 
 	policyFunc := func(upstream net.Addr) (Policy, error) { return REQUIRE, nil }
@@ -623,7 +825,7 @@ func Test_ConnectionCasts(t *testing.T) {
 	go func() {
 		conn, err := net.Dial("tcp", pl.Addr().String())
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		defer conn.Close()
 		conn.Write([]byte("ping"))
@@ -631,7 +833,7 @@ func Test_ConnectionCasts(t *testing.T) {
 
 	conn, err := pl.Accept()
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 	defer conn.Close()
 
@@ -657,7 +859,7 @@ func Test_ConnectionCasts(t *testing.T) {
 func Test_ConnectionErrorsWhenHeaderValidationFails(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 
 	validationError := fmt.Errorf("failed to validate")
@@ -666,7 +868,7 @@ func Test_ConnectionErrorsWhenHeaderValidationFails(t *testing.T) {
 	go func() {
 		conn, err := net.Dial("tcp", pl.Addr().String())
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		defer conn.Close()
 
@@ -689,14 +891,14 @@ func Test_ConnectionErrorsWhenHeaderValidationFails(t *testing.T) {
 
 	conn, err := pl.Accept()
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 	defer conn.Close()
 
 	recv := make([]byte, 4)
 	_, err = conn.Read(recv)
 	if err != validationError {
-		t.Errorf("expected validation error, got %v", err)
+		t.Fatalf("expected validation error, got %v", err)
 	}
 }
 
@@ -750,7 +952,7 @@ func NewTestTLSServer(l net.Listener) *TestTLSServer {
 func Test_TLSServer(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 
 	s := NewTestTLSServer(l)
@@ -765,7 +967,7 @@ func Test_TLSServer(t *testing.T) {
 	go func() {
 		conn, err := tls.Dial("tcp", s.Addr(), s.TLSClientConfig)
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		defer conn.Close()
 
@@ -790,24 +992,24 @@ func Test_TLSServer(t *testing.T) {
 
 	conn, err := s.Listener.Accept()
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 	defer conn.Close()
 
 	recv := make([]byte, 1024)
 	n, err := conn.Read(recv)
 	if err != nil {
-		t.Errorf("expected no error, got %v", err)
+		t.Fatalf("expected no error, got %v", err)
 	}
 	if string(recv[:n]) != "test" {
-		t.Errorf("expected \"test\", got \"%s\" %v", recv[:n], recv[:n])
+		t.Fatalf("expected \"test\", got \"%s\" %v", recv[:n], recv[:n])
 	}
 }
 
 func Test_MisconfiguredTLSServerRespondsWithUnderlyingError(t *testing.T) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 
 	s := NewTestTLSServer(l)
@@ -834,7 +1036,7 @@ func Test_MisconfiguredTLSServerRespondsWithUnderlyingError(t *testing.T) {
 
 		conn, err := net.Dial("tcp", s.Addr())
 		if err != nil {
-			t.Errorf("err: %v", err)
+			t.Fatalf("err: %v", err)
 		}
 		defer conn.Close()
 
@@ -859,14 +1061,14 @@ func Test_MisconfiguredTLSServerRespondsWithUnderlyingError(t *testing.T) {
 
 	conn, err := s.Listener.Accept()
 	if err != nil {
-		t.Errorf("err: %v", err)
+		t.Fatalf("err: %v", err)
 	}
 	defer conn.Close()
 
 	recv := make([]byte, 1024)
 	_, err = conn.Read(recv)
 	if err.Error() != "tls: first record does not look like a TLS handshake" {
-		t.Errorf("expected tls handshake error, got %s", err)
+		t.Fatalf("expected tls handshake error, got %s", err)
 	}
 }
 
@@ -929,7 +1131,7 @@ func benchmarkTCPProxy(size int, b *testing.B) {
 	//create and start the echo backend
 	backend, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		b.Errorf("err: %v", err)
+		b.Fatalf("err: %v", err)
 	}
 	defer backend.Close()
 	go func() {
@@ -941,7 +1143,7 @@ func benchmarkTCPProxy(size int, b *testing.B) {
 			_, err = io.Copy(conn, conn)
 			conn.Close()
 			if err != nil {
-				b.Errorf("Failed to read entire payload: %v", err)
+				b.Fatalf("Failed to read entire payload: %v", err)
 			}
 		}
 	}()
@@ -949,7 +1151,7 @@ func benchmarkTCPProxy(size int, b *testing.B) {
 	//start the proxyprotocol enabled tcp proxy
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		b.Errorf("err: %v", err)
+		b.Fatalf("err: %v", err)
 	}
 	defer l.Close()
 	pl := &Listener{Listener: l}
@@ -961,18 +1163,18 @@ func benchmarkTCPProxy(size int, b *testing.B) {
 			}
 			bConn, err := net.Dial("tcp", backend.Addr().String())
 			if err != nil {
-				b.Errorf("failed to dial backend: %v", err)
+				b.Fatalf("failed to dial backend: %v", err)
 			}
 			go func() {
 				_, err = io.Copy(bConn, conn)
 				if err != nil {
-					b.Errorf("Failed to proxy incoming data to backend: %v", err)
+					b.Fatalf("Failed to proxy incoming data to backend: %v", err)
 				}
 				bConn.(*net.TCPConn).CloseWrite()
 			}()
 			_, err = io.Copy(conn, bConn)
 			if err != nil {
-				b.Errorf("Failed to proxy data from backend: %v", err)
+				b.Fatalf("Failed to proxy data from backend: %v", err)
 			}
 			conn.Close()
 			bConn.Close()
@@ -1000,7 +1202,7 @@ func benchmarkTCPProxy(size int, b *testing.B) {
 	for n := 0; n < b.N; n++ {
 		conn, err := net.Dial("tcp", pl.Addr().String())
 		if err != nil {
-			b.Errorf("err: %v", err)
+			b.Fatalf("err: %v", err)
 		}
 		// Write out the header!
 		header.WriteTo(conn)
@@ -1008,7 +1210,7 @@ func benchmarkTCPProxy(size int, b *testing.B) {
 		go func() {
 			_, err = conn.Write(data)
 			if err != nil {
-				b.Errorf("Failed to write data: %v", err)
+				b.Fatalf("Failed to write data: %v", err)
 			}
 			conn.(*net.TCPConn).CloseWrite()
 
@@ -1016,10 +1218,10 @@ func benchmarkTCPProxy(size int, b *testing.B) {
 		//receive data
 		n, err := io.Copy(ioutil.Discard, conn)
 		if n != int64(len(data)) {
-			b.Errorf("Expected to receive %d bytes, got %d", len(data), n)
+			b.Fatalf("Expected to receive %d bytes, got %d", len(data), n)
 		}
 		if err != nil {
-			b.Errorf("Failed to read data: %v", err)
+			b.Fatalf("Failed to read data: %v", err)
 		}
 		conn.Close()
 	}
